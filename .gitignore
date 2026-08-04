@@ -1,0 +1,43 @@
+# -- Python --
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# -- Secrets & local config --
+.env
+.env.*
+!.env.example
+mcb_config.ini
+!mcb_config.example.ini
+
+# -- Scraped / cached data --
+data/
+attachments/
+pdf_attachments/
+*_attachments/
+*_announcements.json
+*_announcements.html
+logged_in.html
+space.json
+announcements.json
+announcements.html
+
+# -- Logs --
+*.log
+
+# -- Editor / OS --
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# -- Playwright browser downloads (usually cached outside repo, but just in case) --
+playwright/
