@@ -34,6 +34,13 @@ IST = ZoneInfo("Asia/Kolkata")
 
 TELEGRAM_MSG_LIMIT = 3800  # a little under the hard 4096 cap
 
+# Hour-of-day (IST) used as the fallback cutoff for the morning push. The
+# evening scrape runs at 19:00, so any announcement posted after this hour on
+# the previous day would first be scraped the next morning — and we want the
+# morning push to still surface it. Kept slightly before 19:00 so posts that
+# slipped in during the evening scrape are also included.
+_MORNING_LOOKBACK_FROM_HOUR = 18
+
 
 # ---------- formatting helpers ----------
 
@@ -101,6 +108,62 @@ def chunk_for_telegram(text: str, limit: int = TELEGRAM_MSG_LIMIT) -> List[str]:
     if buf:
         chunks.append(buf)
     return chunks
+
+
+# ---------- announcement freshness window ----------
+
+def _parse_ann_datetime(a) -> Optional[datetime]:
+    """Return the announcement's posting time as an IST-aware datetime, or
+    None if it can't be parsed. Accepts ISO 8601 (with or without tz) from
+    `a.date` and falls back to the date-only prefix (assumed 00:00 IST)."""
+    raw = getattr(a, "date", None) or getattr(a, "date_raw", None) or ""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    # Try full ISO first (e.g. "2026-08-05T21:03:00+05:30").
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        return dt.astimezone(IST)
+    except ValueError:
+        pass
+    # Fall back to date-only prefix.
+    try:
+        d = date.fromisoformat(s[:10])
+        return datetime(d.year, d.month, d.day, tzinfo=IST)
+    except ValueError:
+        return None
+
+
+def _freshness_cutoff(slot: Optional[str], today: date) -> datetime:
+    """Return the earliest posting time an announcement can have and still
+    count as 'new' for this push slot.
+
+    - morning / full: yesterday 18:00 IST — catches anything posted after the
+      previous evening's 19:00 scrape.
+    - evening: today 00:00 IST — only today's postings.
+    - anything else (e.g. homework): today 00:00 IST.
+    """
+    if slot == "morning" or slot is None:
+        yday = today - timedelta(days=1)
+        return datetime(yday.year, yday.month, yday.day,
+                        _MORNING_LOOKBACK_FROM_HOUR, 0, tzinfo=IST)
+    return datetime(today.year, today.month, today.day, tzinfo=IST)
+
+
+def _fresh_announcements(anns, cutoff: datetime):
+    """Return announcements at or after `cutoff`, newest-first, keeping the
+    original list order among items that share a timestamp / are unparseable.
+    Unparseable-date items are dropped (they can't be judged 'new')."""
+    out = []
+    for a in anns:
+        dt = _parse_ann_datetime(a)
+        if dt is None:
+            continue
+        if dt >= cutoff:
+            out.append(a)
+    return out
 
 
 # ---------- digest builder ----------
@@ -174,15 +237,15 @@ def _render_homework(child_name: str, today_iso: str, today: date,
     return out
 
 
-def _todays_note_html(agent: Agent, today_iso: str) -> str:
-    """Ask the LLM for a short 2-3 sentence note on today's announcements.
-    Returns empty string if there are no announcements today or the LLM call
-    fails for any reason (we never want a nudge push to be blocked by LLM
-    downtime)."""
+def _todays_note_html(agent: Agent, today_iso: str,
+                      cutoff: datetime) -> str:
+    """Ask the LLM for a short 2-3 sentence note on the announcements that
+    are 'new' as of this push (see `_freshness_cutoff`). Returns empty string
+    if there are no fresh announcements or the LLM call fails for any reason
+    (we never want a nudge push to be blocked by LLM downtime)."""
     lines: List[str] = []
     for child_name, anns in agent.ctx.per_child.items():
-        todays = [a for a in anns
-                  if (a.date or a.date_raw or "")[:10] == today_iso]
+        todays = _fresh_announcements(anns, cutoff)
         for a in todays:
             body = " ".join((a.content or "").split())
             if len(body) > 800:
@@ -343,9 +406,12 @@ def build_html_digest(agent: Optional[Agent] = None, *,
                 f"  • <b>{child}</b> — {title}{link}\n    <i>{esc(ed)} · {when}</i>"
             )
 
+    ann_cutoff = _freshness_cutoff(slot, today)
+    ann_label = "new since yesterday evening" if slot == "morning" else "today"
+
     # Evening: LLM "Note of the day" spans across children, shown once up front
     if render_mode == "evening":
-        note = _todays_note_html(agent, today_iso)
+        note = _todays_note_html(agent, today_iso, ann_cutoff)
         if note:
             parts.append(f"\n📝 <b>Note on today's announcements</b>\n  {note}")
 
@@ -358,13 +424,13 @@ def build_html_digest(agent: Optional[Agent] = None, *,
                 f"\n📝 <b>Yesterday's note (recap)</b>\n  {yday_note}"
             )
 
-    # Today's announcements per child (+ homework if full mode)
+    # Today's / new-since-last-push announcements per child (+ homework if full)
     for child_name, anns in per_child.items():
-        todays = [a for a in anns if (a.date or a.date_raw or "")[:10] == today_iso]
+        todays = _fresh_announcements(anns, ann_cutoff)
         recent_count = len(anns)
-        parts.append(f"\n📢 <b>{esc(child_name)}</b> — {len(todays)} today · {recent_count} in last 30d")
+        parts.append(f"\n📢 <b>{esc(child_name)}</b> — {len(todays)} {ann_label} · {recent_count} in last 30d")
         if not todays:
-            parts.append("  <i>Nothing new today.</i>")
+            parts.append("  <i>Nothing new.</i>")
         else:
             for a in todays[:5]:
                 sender = esc(a.sender or "")

@@ -10,11 +10,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
 
-from .config import AppConfig, ChildAccount
+from .config import AppConfig, ChildAccount, data_path
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,30 @@ def _is_cloudflare_error(html: str, title: str) -> bool:
     if "cf-error-details" in (html or ""):
         return True
     return False
+
+
+def _save_login_diag(child_name: str, page: Page, tag: str) -> Optional[str]:
+    """Best-effort dump of the current page HTML + screenshot to
+    ``data/diag/login/`` so we can post-mortem intermittent login failures.
+    Returns the HTML path (as a string) or None on any error."""
+    try:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = data_path("diag/login")
+        base.mkdir(parents=True, exist_ok=True)
+        slug = "".join(c for c in child_name.lower() if c.isalnum()) or "child"
+        html_path: Path = base / f"{stamp}_{slug}_{tag}.html"
+        png_path: Path = base / f"{stamp}_{slug}_{tag}.png"
+        try:
+            html_path.write_text(page.content(), encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        try:
+            page.screenshot(path=str(png_path), full_page=True)
+        except Exception:
+            pass
+        return str(html_path)
+    except Exception:
+        return None
 
 
 @dataclass
@@ -71,16 +97,45 @@ def _fill_login(page: Page, username: str, password: str, timeout_ms: int = 2000
         raise RuntimeError("Could not find password field")
 
     clicked = False
+    click_errors: list[str] = []
+    # Give each candidate ~12s (up from 5s) — evening renders on the MCB portal
+    # regularly take longer than 5s to finish laying out overlays / animations.
     for sel in login_selectors:
         try:
             if page.locator(sel).count() > 0:
-                page.click(sel, timeout=5000)
+                page.click(sel, timeout=12000)
                 clicked = True
                 break
-        except PWTimeout:
-            continue
+        except PWTimeout as e:
+            click_errors.append(f"{sel}: PWTimeout({e})")
+        except Exception as e:  # noqa: BLE001
+            click_errors.append(f"{sel}: {type(e).__name__}({e})")
+
+    # Fallback 1: press Enter in the password field — most MCB login forms
+    # submit on Enter, and this bypasses actionability checks entirely.
     if not clicked:
-        raise RuntimeError("Could not find login button")
+        try:
+            page.locator("#Password").press("Enter", timeout=5000)
+            clicked = True
+        except Exception as e:  # noqa: BLE001
+            click_errors.append(f"press Enter: {type(e).__name__}({e})")
+
+    # Fallback 2: dispatch a JS click on the login button directly.
+    if not clicked:
+        try:
+            page.evaluate(
+                "() => { const b = document.getElementById('LogID');"
+                " if (b) { b.click(); return true; } return false; }"
+            )
+            clicked = True
+        except Exception as e:  # noqa: BLE001
+            click_errors.append(f"js click: {type(e).__name__}({e})")
+
+    if not clicked:
+        raise RuntimeError(
+            "Login submit failed — button present but not actionable ("
+            + "; ".join(click_errors) + ")"
+        )
 
 
 def _looks_logged_in(url: str) -> bool:
@@ -106,9 +161,17 @@ def fetch_announcements_html(cfg: AppConfig, child: ChildAccount,
             return res
         err = (res.error or "").lower()
         html_hint = (res.html or "")[:400].lower()
-        if any(k in err for k in ("timeout", "gateway", "cloudflare")) or \
-                "bad gateway" in html_hint or "cf-error-details" in html_hint or \
-                "did not render" in err:
+        # Retry on any transient login / gateway / rendering hiccup. "login
+        # submit failed", "login did not complete" and "could not find login
+        # button" all indicate the page rendered oddly and are typically
+        # transient on the MCB portal.
+        retry_keys = (
+            "timeout", "gateway", "cloudflare", "did not render",
+            "login submit failed", "login did not complete",
+            "could not find login",
+        )
+        if any(k in err for k in retry_keys) or \
+                "bad gateway" in html_hint or "cf-error-details" in html_hint:
             log.warning("Fetch attempt %d failed (%s). Retrying in %ss…",
                         attempt, res.error, retry_wait_s)
             if attempt < retries:
@@ -152,7 +215,27 @@ def _fetch_once(cfg: AppConfig, child: ChildAccount,
                                    html=html, error="Cloudflare interstitial / 502",
                                    elapsed_s=elapsed)
 
-            _fill_login(page, child.username, child.password)
+            try:
+                _fill_login(page, child.username, child.password)
+            except RuntimeError as e:
+                # Save a diagnostic snapshot so we can figure out why the login
+                # form didn't cooperate. Best-effort — never let this hide the
+                # underlying error.
+                diag = _save_login_diag(child.name, page, "fill_fail")
+                if diag:
+                    log.warning("Login form failure diag saved: %s", diag)
+                html = ""
+                try:
+                    html = page.content()
+                except Exception:
+                    pass
+                browser.close()
+                return FetchResult(
+                    ok=False, landing_url=page.url if page else "",
+                    ann_url="", html=html,
+                    error=str(e),
+                    elapsed_s=round(time.time() - t0, 2),
+                )
 
             # Wait for either successful redirect back to tenant, or an error state.
             try:
@@ -168,6 +251,9 @@ def _fetch_once(cfg: AppConfig, child: ChildAccount,
             landing = page.url
             if not _looks_logged_in(landing):
                 html = page.content()
+                diag = _save_login_diag(child.name, page, "post_submit")
+                if diag:
+                    log.warning("Post-submit failure diag saved: %s", diag)
                 browser.close()
                 return FetchResult(
                     ok=False, landing_url=landing, ann_url="", html=html,
