@@ -35,7 +35,10 @@ MONTHS = {
 }
 
 MONTH_RX = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
-WEEKDAY_RX = r"(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day)?"
+WEEKDAY_RX = (
+    r"(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?"
+    r"|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
+)
 
 PATTERNS = [
     # Wednesday, October 8, 2025  |  Wednesday, 8 October 2025
@@ -62,6 +65,34 @@ DIARY_EXTRA_PATTERNS = [
     # dd/mm without year (assume current-year-or-next via _pick_year)
     re.compile(r"\b(\d{1,2})[/\-.](\d{1,2})\b(?![/\-.]\d)"),
 ]
+
+# Diary relative-deadline patterns. These are homework-specific — a teacher
+# writing "prepare X for Monday" or "submit by tomorrow" is stating a
+# deadline. We require a leading trigger word ("by", "for", "on", "before",
+# "due", "submit", "till", "until") to reduce false positives on stray
+# weekday mentions inside topic descriptions.
+_DEADLINE_TRIGGER = r"(?:by|for|on|before|due(?:\s+on)?|submit(?:\s+by|\s+on)?|till|until|due\s+date\s*:?)"
+DIARY_WEEKDAY_RX = re.compile(
+    rf"\b{_DEADLINE_TRIGGER}\s+(?:next\s+)?({WEEKDAY_RX})\b",
+    re.I,
+)
+# "tomorrow" / "day after tomorrow" / "next class". "next class" is skipped —
+# too ambiguous.
+DIARY_RELATIVE_RX = re.compile(
+    rf"\b{_DEADLINE_TRIGGER}\s+(tomorrow|day\s+after\s+tomorrow)\b",
+    re.I,
+)
+
+# Map weekday tokens to isoweekday numbers (Mon=1..Sun=7).
+_WEEKDAY_TO_ISO = {
+    "mon": 1, "monday": 1,
+    "tue": 2, "tues": 2, "tuesday": 2,
+    "wed": 3, "wednesday": 3,
+    "thu": 4, "thur": 4, "thurs": 4, "thursday": 4,
+    "fri": 5, "friday": 5,
+    "sat": 6, "saturday": 6,
+    "sun": 7, "sunday": 7,
+}
 
 CONTEXT_RX = re.compile(r"[^.!?\n]*?\b{keyword}\b[^.!?\n]*[.!?]?", re.I)
 
@@ -211,12 +242,28 @@ def _extract_dates(text: str) -> List[date]:
     return sorted({d for d in out if _valid_event_date(d)})
 
 
-def _extract_dates_diary(text: str) -> List[date]:
+def _next_weekday(from_day: date, iso_weekday: int) -> date:
+    """Return the next date on/after `from_day+1` whose ISO weekday matches.
+    Never returns `from_day` itself — if a teacher writes "by Monday" while
+    posting on a Monday, they mean the following Monday."""
+    delta = (iso_weekday - from_day.isoweekday()) % 7
+    if delta == 0:
+        delta = 7
+    return from_day + timedelta(days=delta)
+
+
+def _extract_dates_diary(text: str, ref_date: date | None = None) -> List[date]:
     """Extract dates from diary/homework text using both the standard patterns
     and the more relaxed diary-only patterns (assume current year when the
-    writer omits it)."""
+    writer omits it).
+
+    `ref_date` — the diary entry's own date. Used to resolve relative refs
+    like "by tomorrow" or "for Monday". Defaults to today (IST) if omitted so
+    behavior stays backwards-compatible for older callers.
+    """
     if not text:
         return []
+    ref = ref_date or _today_ist()
     out: List[date] = list(_extract_dates(text))
 
     # Relaxed: "3rd August" / "August 3rd" — no weekday, no year
@@ -247,6 +294,19 @@ def _extract_dates_diary(text: str) -> List[date]:
                 out.append(date(year, month, day))
         except ValueError:
             continue
+
+    # Relative refs — only when preceded by an explicit deadline trigger
+    # ("by tomorrow", "for Monday", "submit by Friday", etc.).
+    for m in DIARY_RELATIVE_RX.finditer(text):
+        token = m.group(1).lower().replace("  ", " ").strip()
+        if token == "tomorrow":
+            out.append(ref + timedelta(days=1))
+        elif token.startswith("day after"):
+            out.append(ref + timedelta(days=2))
+    for m in DIARY_WEEKDAY_RX.finditer(text):
+        wd = _WEEKDAY_TO_ISO.get(m.group(1).lower())
+        if wd:
+            out.append(_next_weekday(ref, wd))
 
     return sorted({d for d in out if _valid_event_date(d)})
 
@@ -334,8 +394,16 @@ def extract_events_from_diary(child: str, diary_entries) -> List[Event]:
         text = de.description or ""
         if not text:
             continue
-        found = _extract_dates_diary(text)
-        # Also drop the diary_date itself if the text is "for tomorrow" style
+        # Use the diary entry's own date as the reference for relative refs
+        # like "by tomorrow" or "for Monday" — otherwise a stale scrape would
+        # resolve them against today instead of the day the teacher wrote them.
+        ref_date: date | None = None
+        try:
+            if de.diary_date:
+                ref_date = date.fromisoformat(de.diary_date[:10])
+        except ValueError:
+            pass
+        found = _extract_dates_diary(text, ref_date=ref_date)
         for d in found:
             snippet = _snippet_for(text, d) or text[:200]
             base_kind = _classify(snippet)

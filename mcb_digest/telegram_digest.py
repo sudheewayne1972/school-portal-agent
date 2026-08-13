@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -40,6 +41,28 @@ TELEGRAM_MSG_LIMIT = 3800  # a little under the hard 4096 cap
 # morning push to still surface it. Kept slightly before 19:00 so posts that
 # slipped in during the evening scrape are also included.
 _MORNING_LOOKBACK_FROM_HOUR = 18
+
+# At the evening push, deadlines dated TODAY are usually already done — showing
+# them adds noise. We keep an exception for things that stay actionable in the
+# evening: online registrations, fee payments, form submissions with a
+# midnight/EOD deadline. Match against title/context/tag.
+_EVENING_KEEP_TODAY_RX = re.compile(
+    r"registration|register|fee\b|fees\b|payment|pay online|last date "
+    r"for payment|form submission|submit .*form",
+    re.I,
+)
+
+
+def _is_registration_or_fee(ev: dict) -> bool:
+    """Return True if an event dict looks like a registration/fee deadline
+    that a parent might still act on in the evening."""
+    blob = " ".join([
+        str(ev.get("title", "")),
+        str(ev.get("context", "")),
+        str(ev.get("source_title", "")),
+        str(ev.get("tag", "")),
+    ])
+    return bool(_EVENING_KEEP_TODAY_RX.search(blob))
 
 
 # ---------- formatting helpers ----------
@@ -393,18 +416,30 @@ def build_html_digest(agent: Optional[Agent] = None, *,
         return "\n".join(parts)
 
     # ---- full / evening modes ----
+    # Evening cleanup: hide today-dated items from Reminders/Upcoming unless
+    # they look like registration/fee deadlines (still actionable in the
+    # evening). Morning/full push keeps today's items — that's the point.
+    def _hide_today(ev: dict) -> bool:
+        if render_mode != "evening":
+            return False
+        if (ev.get("event_date") or "")[:10] != today_iso:
+            return False
+        return not _is_registration_or_fee(ev)
+
     if reminds:
-        parts.append("\n⏰ <b>Reminders</b>")
-        for ev in reminds:
-            days = ev.get("_days_out", "?")
-            when = "today" if days == 0 else f"in {days}d"
-            child = esc(ev.get("child", ""))
-            title = esc(ev.get("title", ""))
-            ed = pretty_date(ev.get("event_date", ""), today)
-            link = _open_link(ev.get("source_url", ""))
-            parts.append(
-                f"  • <b>{child}</b> — {title}{link}\n    <i>{esc(ed)} · {when}</i>"
-            )
+        visible_reminds = [ev for ev in reminds if not _hide_today(ev)]
+        if visible_reminds:
+            parts.append("\n⏰ <b>Reminders</b>")
+            for ev in visible_reminds:
+                days = ev.get("_days_out", "?")
+                when = "today" if days == 0 else f"in {days}d"
+                child = esc(ev.get("child", ""))
+                title = esc(ev.get("title", ""))
+                ed = pretty_date(ev.get("event_date", ""), today)
+                link = _open_link(ev.get("source_url", ""))
+                parts.append(
+                    f"  • <b>{child}</b> — {title}{link}\n    <i>{esc(ed)} · {when}</i>"
+                )
 
     ann_cutoff = _freshness_cutoff(slot, today)
     ann_label = "new since yesterday evening" if slot == "morning" else "today"
@@ -461,15 +496,17 @@ def build_html_digest(agent: Optional[Agent] = None, *,
 
     # Upcoming
     if ups:
-        parts.append("\n🗓 <b>Upcoming</b>")
-        for ev in ups[:8]:
-            ed = pretty_date(ev.get("event_date", ""), today)
-            child = esc(ev.get("child", ""))
-            title = esc(ev.get("title", ""))
-            kind_glyph = "⏰" if ev.get("kind") == "deadline" else "•"
-            link = _open_link(ev.get("source_url", ""))
-            parts.append(
-                f"  {kind_glyph} {esc(ed)} — <b>{child}</b>: {title}{link}"
-            )
+        visible_ups = [ev for ev in ups if not _hide_today(ev)]
+        if visible_ups:
+            parts.append("\n🗓 <b>Upcoming</b>")
+            for ev in visible_ups[:8]:
+                ed = pretty_date(ev.get("event_date", ""), today)
+                child = esc(ev.get("child", ""))
+                title = esc(ev.get("title", ""))
+                kind_glyph = "⏰" if ev.get("kind") == "deadline" else "•"
+                link = _open_link(ev.get("source_url", ""))
+                parts.append(
+                    f"  {kind_glyph} {esc(ed)} — <b>{child}</b>: {title}{link}"
+                )
 
     return "\n".join(parts)
