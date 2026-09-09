@@ -4,7 +4,7 @@
 #   2. `python push_digest.py`            -- post the digest to Telegram group
 # Email is skipped (paused per user request).
 #
-# Usage (from the project root, as the user who will own the task):
+# Usage (from the project root, in Administrator PowerShell):
 #     powershell -ExecutionPolicy Bypass -File .\setup_scheduler.ps1
 #
 # To remove:
@@ -12,9 +12,17 @@
 
 $ErrorActionPreference = 'Stop'
 
+$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdmin) {
+    throw 'Run this script from an Administrator PowerShell window.'
+}
+
 $TaskName    = 'MCB Data Refresh'
 $ProjectRoot = $PSScriptRoot
 $Python      = (Get-Command python).Source
+$PlaywrightBrowsers = Join-Path $env:LOCALAPPDATA 'ms-playwright'
 $Scrape      = Join-Path $ProjectRoot 'run_digest.py'
 $Push        = Join-Path $ProjectRoot 'push_digest.py'
 # The Python apps write structured logs to mcb_scheduler.log via their own
@@ -25,6 +33,7 @@ $WrapperLog  = Join-Path $ProjectRoot 'mcb_wrapper.log'
 foreach ($f in @($Scrape, $Push)) {
     if (-not (Test-Path $f)) { throw "$f not found" }
 }
+if (-not (Test-Path $PlaywrightBrowsers)) { throw "$PlaywrightBrowsers not found" }
 
 # Two daily triggers: 6:30 AM and 7:00 PM local time
 $Triggers = @(
@@ -36,8 +45,8 @@ $Triggers = @(
 # stdout/stderr redirects into the wrapper log; use `&` (not `&&`) on the push
 # so a transient scrape hiccup doesn't block the reminder from going out.
 $Cmd = "cmd.exe"
-$ScrapeArgs = "/c `"cd /d `"$ProjectRoot`" && `"$Python`" `"$Scrape`" --dry-run >> `"$WrapperLog`" 2>&1`""
-$PushArgs   = "/c `"cd /d `"$ProjectRoot`" && `"$Python`" `"$Push`" >> `"$WrapperLog`" 2>&1`""
+$ScrapeArgs = "/d /s /c set `"PLAYWRIGHT_BROWSERS_PATH=$PlaywrightBrowsers`" && cd /d `"$ProjectRoot`" && `"$Python`" `"$Scrape`" --dry-run >> `"$WrapperLog`" 2>&1"
+$PushArgs   = "/d /s /c cd /d `"$ProjectRoot`" && `"$Python`" `"$Push`" >> `"$WrapperLog`" 2>&1"
 
 $Actions = @(
     (New-ScheduledTaskAction -Execute $Cmd -Argument $ScrapeArgs -WorkingDirectory $ProjectRoot),
@@ -51,7 +60,7 @@ $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
 
-$Principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+$Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
 # Clean up any legacy task from the old single-trigger design
 foreach ($old in @('MCB Daily Digest')) {
@@ -76,6 +85,7 @@ Register-ScheduledTask -TaskName $TaskName `
 Write-Host ""
 Write-Host "OK: Task '$TaskName' registered."
 Write-Host "   Runs      : 06:30 and 19:00 local time, daily"
+Write-Host "   Account   : SYSTEM"
 Write-Host "   Python    : $Python"
 Write-Host "   Action 1  : $Scrape --dry-run"
 Write-Host "   Action 2  : $Push"

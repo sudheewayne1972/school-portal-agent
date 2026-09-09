@@ -1,16 +1,23 @@
 # Register the MCB Deadline Reminder Windows Scheduled Task.
-# Runs every day at 6:00 PM local time:
+# Runs every day at 6:10 PM local time:
 #   python push_reminders.py
-# The script pushes only when at least one event is 5/3/2/1 days out,
+# The script pushes only when at least one event is 5/4/3/2/1 days out,
 # so this is a silent no-op on days with nothing pending.
 #
-# Usage (from the project root, as the user who will own the task):
+# Usage (from the project root, in Administrator PowerShell):
 #     powershell -ExecutionPolicy Bypass -File .\setup_reminders_scheduler.ps1
 #
 # To remove:
 #     Unregister-ScheduledTask -TaskName 'MCB Deadline Reminders' -Confirm:$false
 
 $ErrorActionPreference = 'Stop'
+
+$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdmin) {
+    throw 'Run this script from an Administrator PowerShell window.'
+}
 
 $TaskName    = 'MCB Deadline Reminders'
 $ProjectRoot = $PSScriptRoot
@@ -20,7 +27,7 @@ $WrapperLog  = Join-Path $ProjectRoot 'mcb_wrapper.log'
 
 if (-not (Test-Path $Runner)) { throw "$Runner not found" }
 
-$Trigger = New-ScheduledTaskTrigger -Daily -At 6:00PM
+$Trigger = New-ScheduledTaskTrigger -Daily -At 6:10PM
 
 $Cmd    = "cmd.exe"
 $Args   = "/c `"cd /d `"$ProjectRoot`" && `"$Python`" `"$Runner`" >> `"$WrapperLog`" 2>&1`""
@@ -33,7 +40,7 @@ $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
-$Principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+$Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Write-Host "Removing existing task '$TaskName'..."
@@ -45,11 +52,12 @@ Register-ScheduledTask -TaskName $TaskName `
     -Action $Action `
     -Settings $Settings `
     -Principal $Principal `
-    -Description "Send a Telegram nudge for events with deadlines 5/3/2/1 days out, daily at 6:00 PM." | Out-Null
+    -Description "Send a Telegram nudge for events with deadlines 5/4/3/2/1 days out, daily at 6:10 PM." | Out-Null
 
 Write-Host ""
 Write-Host "OK: Task '$TaskName' registered."
-Write-Host "   Runs      : 18:00 local time, daily"
+Write-Host "   Runs      : 18:10 local time, daily"
+Write-Host "   Account   : SYSTEM"
 Write-Host "   Python    : $Python"
 Write-Host "   Action    : $Runner"
 Write-Host "   Wrapper   : $WrapperLog"

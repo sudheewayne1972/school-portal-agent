@@ -66,7 +66,7 @@ class AppConfig:
     sso_base: str = "https://ssolive.myclassboard.com"
     datetype: int = 3  # "last 30 days" listing on the announcements page
     timezone: str = "Asia/Kolkata"
-    reminder_offsets_days: tuple = (5, 3, 2, 1)
+    reminder_offsets_days: tuple = (5, 4, 3, 2, 1)
     # Ignore any announcement or event dated before this floor. Bump this
     # forward at the start of a new academic year to purge stale data.
     data_floor_date: date = date(2026, 7, 13)

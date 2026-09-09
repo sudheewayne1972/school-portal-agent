@@ -7,8 +7,8 @@ Instead of logging into the portal, the agent scrapes it for you and pushes a fo
 | Time (local) | Slot | Content |
 |---|---|---|
 | 06:30 | Morning | Full digest — today's announcements, today's homework, upcoming events, yesterday's LLM note (recap) |
-| 16:15 (Mon–Fri) | Homework | Just what the class diary posted today. No accumulation. |
-| 18:00 | Reminders | Nudges for anything with an explicit deadline **5, 3, 2, or 1 day out** |
+| 16:00, 17:00, 18:00, 20:00, 21:00 (Mon–Fri) | Homework | Re-check the class diary and notify only when new work appears. |
+| 18:10 | Reminders | Nudges for anything with an explicit deadline **5, 4, 3, 2, or 1 day out** |
 | 19:00 | Evening | Wrap-up with an LLM-generated "note of the day" (2–3 sentences) |
 
 Plus an interactive bot (`/today`, `/homework`, `/events`, `/reload`, or plain-English questions) that answers on demand.
@@ -59,13 +59,16 @@ python push_digest.py --slot morning --dry-run
 # 6. Real run (posts to your group)
 python push_digest.py --slot morning
 
-# 7. Schedule it (Windows)
+# 7. Schedule it (Windows, from Administrator PowerShell)
 powershell -ExecutionPolicy Bypass -File .\setup_scheduler.ps1
-powershell -ExecutionPolicy Bypass -File .\setup_homework_push_scheduler.ps1
+powershell -ExecutionPolicy Bypass -File .\setup_homework_hourly_scheduler.ps1
 powershell -ExecutionPolicy Bypass -File .\setup_reminders_scheduler.ps1
 powershell -ExecutionPolicy Bypass -File .\setup_diary_scheduler.ps1
 powershell -ExecutionPolicy Bypass -File .\setup_bot_autostart.ps1
 ```
+
+The tasks run as `SYSTEM`, so they continue after a reboot without a user
+sign-in or an open VS Code window.
 
 The interactive bot runs separately (once started, it stays running):
 
@@ -116,7 +119,7 @@ Optional: SMTP settings if you also want email delivery.
                     └───────────────┬────────────────────────────┘
                                     │
    ┌────────────────────┬───────────┼───────────────┬───────────────┐
-   │ 06:30              │ 16:15     │ 18:00         │ 19:00         │
+  │ 06:30              │ hourly    │ 18:10         │ 19:00         │
    │ full digest        │ homework  │ reminders     │ evening       │
    ▼                    ▼           ▼               ▼               │
  run_digest.py     run_diary.py   push_reminders   run_digest.py    │
@@ -153,7 +156,7 @@ Under the hood:
 - **Disable a slot** — unregister the corresponding task: `Unregister-ScheduledTask -TaskName 'MCB Data Refresh'`.
 - **Add or remove a child** — edit `mcb_config.ini`.
 - **Swap LLM providers** — replace the `LLM` class in [mcb_digest/llm.py](mcb_digest/llm.py). The rest of the code only calls `LLM().chat(messages, max_output_tokens=..., temperature=...)`.
-- **Change the reminder cadence** — set `reminder_offsets_days` in [mcb_digest/config.py](mcb_digest/config.py) (default `(5, 3, 2, 1)`).
+- **Change the reminder cadence** — set `reminder_offsets_days` in [mcb_digest/config.py](mcb_digest/config.py) (default `(5, 4, 3, 2, 1)`).
 - **New academic year** — set `DATA_FLOOR_DATE=YYYY-MM-DD` in `.env`, then run `python purge_stale.py` to drop events older than the floor.
 
 ---

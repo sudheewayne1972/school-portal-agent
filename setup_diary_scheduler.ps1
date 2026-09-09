@@ -4,7 +4,7 @@
 # (Weekday scrapes are handled by the 'MCB Homework Push' task at 4:15 PM Mon-Fri,
 # which invokes run_diary.py itself before pushing.)
 #
-# Usage (from the project root, as the user who will own the task):
+# Usage (from the project root, in Administrator PowerShell):
 #     powershell -ExecutionPolicy Bypass -File .\setup_diary_scheduler.ps1
 #
 # To remove:
@@ -12,13 +12,22 @@
 
 $ErrorActionPreference = 'Stop'
 
+$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdmin) {
+    throw 'Run this script from an Administrator PowerShell window.'
+}
+
 $TaskName    = 'MCB Diary Refresh'
 $ProjectRoot = $PSScriptRoot
 $Python      = (Get-Command python).Source
+$PlaywrightBrowsers = Join-Path $env:LOCALAPPDATA 'ms-playwright'
 $Runner      = Join-Path $ProjectRoot 'run_diary.py'
 $WrapperLog  = Join-Path $ProjectRoot 'mcb_wrapper.log'
 
 if (-not (Test-Path $Runner)) { throw "$Runner not found" }
+if (-not (Test-Path $PlaywrightBrowsers)) { throw "$PlaywrightBrowsers not found" }
 
 # Weekly trigger, Saturday at 4:30 PM local
 $Trigger = New-ScheduledTaskTrigger -Weekly `
@@ -26,7 +35,7 @@ $Trigger = New-ScheduledTaskTrigger -Weekly `
     -At 4:30PM
 
 $Cmd     = "cmd.exe"
-$Args    = "/c `"cd /d `"$ProjectRoot`" && `"$Python`" `"$Runner`" >> `"$WrapperLog`" 2>&1`""
+$Args    = "/d /s /c set `"PLAYWRIGHT_BROWSERS_PATH=$PlaywrightBrowsers`" && cd /d `"$ProjectRoot`" && `"$Python`" `"$Runner`" >> `"$WrapperLog`" 2>&1"
 $Action  = New-ScheduledTaskAction -Execute $Cmd -Argument $Args -WorkingDirectory $ProjectRoot
 
 $Settings = New-ScheduledTaskSettingsSet `
@@ -36,7 +45,7 @@ $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
 
-$Principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+$Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Write-Host "Removing existing task '$TaskName'..."
@@ -53,6 +62,7 @@ Register-ScheduledTask -TaskName $TaskName `
 Write-Host ""
 Write-Host "OK: Task '$TaskName' registered."
 Write-Host "   Runs      : 16:30 local time, Saturday"
+Write-Host "   Account   : SYSTEM"
 Write-Host "   Python    : $Python"
 Write-Host "   Action    : $Runner"
 Write-Host "   Wrapper   : $WrapperLog"

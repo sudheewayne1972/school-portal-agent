@@ -2,7 +2,7 @@
 
 Runs a polling bot that:
   * Responds to /help, /today, /events, /reload, /reset commands
-  * Answers any message that @mentions the bot (in a group) or any DM
+    * Answers messages in configured chats and DMs
   * Pushes the daily digest + reminders to a configured group chat
 
 Environment (read via mcb_digest.config._load_env_file):
@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
@@ -29,6 +29,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 from telegram.request import HTTPXRequest
@@ -60,7 +61,7 @@ HELP_TEXT = (
     "/reload — re-read the latest scraped data\n"
     "/reset — clear chat history\n"
     "/help — show this message\n\n"
-    "In a group, @mention me or reply to me to ask a question.\n"
+    "In the family group, just type your question.\n"
     "In a DM, just type your question."
 )
 
@@ -90,7 +91,22 @@ def _allowed(update: Update, allowed_chats: Optional[set[int]]) -> bool:
     if not allowed_chats:
         return True
     chat = update.effective_chat
-    return chat is not None and chat.id in allowed_chats
+    allowed = chat is not None and chat.id in allowed_chats
+    if not allowed:
+        log.warning("Ignoring update %s from unauthorized chat_id=%s",
+                    update.update_id, chat.id if chat else None)
+    return allowed
+
+
+async def _log_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    message = update.effective_message
+    log.info("Received update=%s chat_id=%s type=%s message=%s command=%s",
+             update.update_id,
+             chat.id if chat else None,
+             chat.type if chat else None,
+             bool(message),
+             bool(message and message.text and message.text.startswith("/")))
 
 
 async def _reply_typing(update: Update) -> None:
@@ -99,6 +115,17 @@ async def _reply_typing(update: Update) -> None:
             await update.effective_chat.send_action(ChatAction.TYPING)
         except Exception:
             pass
+
+
+async def _register_commands(app: Application) -> None:
+    await app.bot.set_my_commands([
+        BotCommand("today", "Today's summary"),
+        BotCommand("homework", "Today's homework and active deadlines"),
+        BotCommand("events", "Upcoming events"),
+        BotCommand("reload", "Reload the latest scraped data"),
+        BotCommand("reset", "Clear chat history"),
+        BotCommand("help", "Show available commands"),
+    ])
 
 
 # ---------- command handlers ----------
@@ -258,24 +285,8 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     bot_username = (await ctx.bot.get_me()).username
 
-    if chat and chat.type in ("group", "supergroup"):
-        mentioned = False
-        if msg.entities:
-            for ent in msg.entities:
-                if ent.type == "mention":
-                    frag = msg.text[ent.offset:ent.offset + ent.length]
-                    if frag.lower() == f"@{bot_username.lower()}":
-                        mentioned = True
-                        break
-        replied_to_us = (msg.reply_to_message
-                         and msg.reply_to_message.from_user
-                         and msg.reply_to_message.from_user.username == bot_username)
-        if not (mentioned or replied_to_us):
-            return
-
-    question = msg.text
-    if f"@{bot_username}" in question:
-        question = question.replace(f"@{bot_username}", "").strip()
+    question = re.sub(f"@{re.escape(bot_username)}", "", msg.text,
+                      flags=re.IGNORECASE).strip()
     if not question:
         return
 
@@ -318,6 +329,7 @@ def build_application(token: str, agent: Optional[Agent] = None) -> Application:
         .token(token)
         .request(request)
         .get_updates_request(get_updates_request)
+        .post_init(_register_commands)
         .build()
     )
     app.bot_data["agent"] = agent
@@ -344,6 +356,7 @@ def build_application(token: str, agent: Optional[Agent] = None) -> Application:
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(TypeHandler(Update, _log_update), group=-1)
     return app
 
 
@@ -356,6 +369,7 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     load_config()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:

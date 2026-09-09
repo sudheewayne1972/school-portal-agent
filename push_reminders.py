@@ -1,14 +1,14 @@
 """One-shot reminder nudger.
 
-Fired by a dedicated Windows Scheduled Task each day at 6:00 PM local. Loads
-the event store, finds every event whose deadline is exactly 5, 3, 2 or 1
+Fired by a dedicated Windows Scheduled Task each day at 6:10 PM local. Loads
+the event store, finds every event whose deadline is exactly 5, 4, 3, 2 or 1
 days out, and posts a single combined Telegram message. If there is nothing
 due, no message is sent (avoids empty pings).
 
 Usage:
     python push_reminders.py                    # normal use (scheduled task)
     python push_reminders.py --dry-run          # print instead of send
-    python push_reminders.py --offsets 5 3 2 1  # override offsets
+    python push_reminders.py --offsets 5 4 3 2 1  # override offsets
     python push_reminders.py --force-empty      # send even if no reminders due
 """
 from __future__ import annotations

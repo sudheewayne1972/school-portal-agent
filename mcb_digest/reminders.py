@@ -1,4 +1,4 @@
-"""Persistent event store and 3/2/1-day reminder computation."""
+"""Persistent event store and deadline reminder computation."""
 from __future__ import annotations
 
 import json
@@ -92,7 +92,7 @@ def upcoming_events(store: Iterable[dict], today: date | None = None) -> List[di
 
 
 def reminders_due(store: Iterable[dict], today: date | None = None,
-                  offsets_days: tuple = (3, 2, 1)) -> List[dict]:
+                  offsets_days: tuple = (5, 4, 3, 2, 1)) -> List[dict]:
     """Return events whose event_date is exactly N days away for N in offsets."""
     today = today or datetime.now(IST).date()
     offset_dates = {today + timedelta(days=n): n for n in offsets_days}
