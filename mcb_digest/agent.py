@@ -223,6 +223,7 @@ class Agent:
         self.ctx = load_context(self.cfg)
 
     def ask(self, question: str, requester: Optional[str] = None) -> str:
+        self.reload_context()
         user = question.strip()
         if requester:
             user = f"(from {requester}) {user}"
